@@ -172,7 +172,7 @@ done
 
 # Fallback to kpartx if losetup -P didn't create partition nodes
 if [[ ! -b "${EFI_PART}" || ! -b "${SWAP_PART}" || ! -b "${ROOT_PART}" ]]; then
-    log "  losetup -P partition nodes missing — falling back to kpartx"
+    log "  losetup -P partition nodes missing -- falling back to kpartx"
     sudo kpartx -av "${LOOP_DEV}"
     USING_KPARTX=true
     EFI_PART="/dev/mapper/$(basename "${LOOP_DEV}")p1"
@@ -203,9 +203,9 @@ ROOT_PARTUUID=$(sudo blkid -o value -s PARTUUID "${ROOT_PART}")
 # shellcheck disable=SC2034
 EFI_PARTUUID=$( sudo blkid -o value -s PARTUUID "${EFI_PART}")
 
-[[ -z "${ROOT_UUID}"     ]] && error "ROOT_UUID is empty — blkid failed"
-[[ -z "${ROOT_PARTUUID}" ]] && error "ROOT_PARTUUID is empty — blkid failed"
-[[ -z "${SWAP_UUID}"     ]] && error "SWAP_UUID is empty — blkid failed"
+[[ -z "${ROOT_UUID}"     ]] && error "ROOT_UUID is empty -- blkid failed"
+[[ -z "${ROOT_PARTUUID}" ]] && error "ROOT_PARTUUID is empty -- blkid failed"
+[[ -z "${SWAP_UUID}"     ]] && error "SWAP_UUID is empty -- blkid failed"
 
 log "Mount and extract rootfs"
 mkdir -p "${MNT}"
@@ -232,7 +232,7 @@ fi
 # Remove default ubuntu user name
 sudo chroot "${MNT}" userdel -r ubuntu >/dev/null 2>&1 || true
 
-# Fix resolv.conf — remove Docker's copy, replace with systemd-resolved symlink
+# Fix resolv.conf -- remove Docker's copy, replace with systemd-resolved symlink
 sudo rm -f "${MNT}/etc/resolv.conf"
 sudo ln -sf /run/systemd/resolve/stub-resolv.conf "${MNT}/etc/resolv.conf"
 log "  resolv.conf -> $(sudo readlink ${MNT}/etc/resolv.conf)"
@@ -252,10 +252,80 @@ ff02::2     ip6-allrouters
 EOF
 log "  hostname and hosts file written"
 
-# Clear the source list added before
-sudo rm -f "${MNT}/etc/apt/sources.list"
-sudo rm -f "${MNT}/etc/apt/sources.list.d/"*.list
-sudo rm -f "${MNT}/etc/apt/sources.list.d/"*.sources
+sudo tee "${MNT}/etc/apt/sources.list.d/ubuntu.sources" > /dev/null << 'EOF'
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu
+Suites: noble noble-updates noble-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu
+Suites: noble-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+
+sudo tee "${MNT}/etc/sysctl.d/99-dmesg.conf" > /dev/null << 'EOF'
+kernel.dmesg_restrict = 0
+EOF
+
+# Best-effort patch of any profile.d scripts that call `dmesg` (harmless if
+# none match). `|| true` on the pipe head is required because `set -o pipefail`
+# would otherwise propagate grep's "no match" exit 1 through the pipe and
+# `set -e` would abort the whole build.
+{ sudo grep -rl "dmesg" "${MNT}/etc/profile.d/" 2>/dev/null || true; } | while read -r f; do
+    log "  Patching dmesg call in: ${f}"
+    sudo sed -i 's/^\(.*dmesg.*\)$/# \1 # disabled -- dmesg_restrict/' "${f}"
+done
+
+# Fix /etc/profile.d scripts
+sudo sed -i 's|^\(.*\. "$i".*\)$|{ \1; } 2>/dev/null \|\| true|g' "${MNT}/etc/profile"
+# Diagnostic-only grep; a missing match is not a failure.
+sudo grep "profile.d" "${MNT}/etc/profile" || true
+
+# Fix mesa_driver.sh -- if line was commented out leaving orphaned else/fi
+sudo tee "${MNT}/etc/profile.d/mesa_driver.sh" > /dev/null << 'EOF'
+#!/bin/sh
+# Mesa driver selection based on SR-IOV VF detection
+if dmesg 2>/dev/null | grep -q "SR-IOV VF"; then
+    export MESA_LOADER_DRIVER_OVERRIDE=pl111
+else
+    export MESA_LOADER_DRIVER_OVERRIDE=iris
+fi
+EOF
+
+
+# Write to fstab with UUIDs for root and EFI partitions
+log "Write fstab"
+sudo tee "${MNT}/etc/fstab" > /dev/null << EOF
+# <file system>        <mount point>  <type>  <options>           <dump> <pass>
+UUID=${ROOT_UUID}      /              ext4    errors=remount-ro   0      1
+UUID=${EFI_UUID}       /boot/efi      vfat    defaults            0      2
+UUID=${SWAP_UUID}      none           swap    sw                  0      0
+EOF
+log "  fstab written:"
+sudo cat "${MNT}/etc/fstab"
+
+# Fix resolv.conf — remove Docker's copy, replace with systemd-resolved symlink
+sudo rm -f "${MNT}/etc/resolv.conf"
+sudo ln -sf /run/systemd/resolve/stub-resolv.conf "${MNT}/etc/resolv.conf"
+log "  resolv.conf -> $(sudo readlink ${MNT}/etc/resolv.conf)"
+
+
+# Fix hostname and hosts file
+sudo tee "${MNT}/etc/hostname" > /dev/null << 'EOF'
+edge-node
+EOF
+
+sudo tee "${MNT}/etc/hosts" > /dev/null << 'EOF'
+127.0.0.1   localhost
+127.0.1.1   edge-node
+::1         localhost ip6-localhost ip6-loopback
+ff02::1     ip6-allnodes
+ff02::2     ip6-allrouters
+EOF
+log "  hostname and hosts file written"
 
 sudo tee "${MNT}/etc/apt/sources.list.d/ubuntu.sources" > /dev/null << 'EOF'
 Types: deb
@@ -352,7 +422,7 @@ sudo grub-install \
 # Verify modules landed on EFI partition
 GRUB_CFG_DIR=$(sudo find "${MNT}/boot/efi" -name "*.mod" -type f 2>/dev/null \
     | head -1 | xargs dirname 2>/dev/null | sed 's|/x86_64-efi||' || true)
-[[ -z "${GRUB_CFG_DIR}" ]] && die "GRUB modules missing from EFI partition — grub-install failed"
+[[ -z "${GRUB_CFG_DIR}" ]] && die "GRUB modules missing from EFI partition -- grub-install failed"
 log "  GRUB modules at : ${GRUB_CFG_DIR}"
 
 # Grub config for booting the image

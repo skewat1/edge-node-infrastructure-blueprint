@@ -132,6 +132,59 @@ download_and_install_gpg_key() {
 	echo "Intel overlay GPG key installed at ${APT_KEYRINGS_DIR}/ptl.gpg."
 }
 
+# ---------------------------------------------------------------------------
+# Configure APT preferences for Intel ECI repository
+# ---------------------------------------------------------------------------
+# Pins camera packages to ECI while blocking systemd packages to force them
+# from canonical Ubuntu repos. Extracted as a separate function to keep
+# install_camera_packages() readable.
+configure_eci_apt_preferences() {
+	local eci_host
+	eci_host=$(printf '%s\n' "${INTEL_ECI_URL}" | awk -F/ '{print $3}')
+	
+	echo "Configuring APT preferences for ECI repository..."
+	
+	# Pin camera packages to ECI with priority 600 (higher than default 500)
+	cat > /etc/apt/preferences.d/intel-eci << EOF
+Package: libcamhal-ipu75xa0 libcamhal-ipu75xa libcamera-tools libcamhal-common libcamhal0 libia-*-ipu75xa0 gstreamer1.0-icamera libgsticamerainterface-1.0-1 intel-mipi-gmsl-dkms
+Pin: origin ${eci_host}
+Pin-Priority: 600
+EOF
+	
+	# Block systemd and related packages from ECI (priority -1 = never install from this source)
+	# Force these critical system packages to come from canonical Ubuntu repos only
+	local -a blocked_packages=(
+		"libnss-myhostname" "libnss-mymachines" "libnss-resolve"
+		"libpam-systemd" "libsystemd-dev" "libsystemd0"
+		"libudev-dev" "libudev1"
+		"systemd-boot-efi" "systemd-boot" "systemd-container" "systemd-coredump"
+		"systemd-dev" "systemd-homed" "systemd-journal-remote" "systemd-oomd"
+		"systemd-resolved" "systemd-standalone-sysusers" "systemd-standalone-tmpfiles"
+		"systemd-sysv" "systemd-tests" "systemd-timesyncd" "systemd-ukify"
+		"systemd-userdbd" "systemd" "udev"
+	)
+	
+	cat > /etc/apt/preferences.d/isar << 'EOFSTART'
+# Default priority for all ECI packages (set to 500, same as Ubuntu default)
+Package: *
+Pin: origin eci.intel.com
+Pin-Priority: 500
+
+EOFSTART
+	
+	# Append blocked package rules
+	for pkg in "${blocked_packages[@]}"; do
+		cat >> /etc/apt/preferences.d/isar << EOF
+Package: ${pkg}
+Pin: origin eci.intel.com
+Pin-Priority: -1
+
+EOF
+	done
+	
+	echo "APT preferences configured: camera packages pinned to ECI, systemd packages blocked."
+}
+
 install_camera_packages() {
 	echo "Setting up Intel ECI repository and installing camera packages..."
 	install -d -m 0755 "${APT_KEYRINGS_DIR}"
@@ -155,18 +208,16 @@ deb [signed-by=${APT_KEYRINGS_DIR}/intel-eci.gpg] ${INTEL_ECI_URL} isar main
 EOF
 	echo "Intel ECI repository configured."
 	
-	# Set package pin priority for ECI repository
-	local eci_host
-	eci_host=$(printf '%s\n' "${INTEL_ECI_URL}" | awk -F/ '{print $3}')
-	cat > /etc/apt/preferences.d/intel-eci << EOF
-Package: libcamhal-ipu75xa0 libcamhal-ipu75xa libcamera-tools libcamhal-common libcamhal0 libia-*-ipu75xa0 gstreamer1.0-icamera libgsticamerainterface-1.0-1
-Pin: origin ${eci_host}
-Pin-Priority: 600
-EOF
+	# Configure APT preferences for ECI packages
+	configure_eci_apt_preferences
 	
 	# Install camera packages
 	apt update
 	export DEBIAN_FRONTEND=noninteractive
+	
+	# Pre-configure debconf to avoid interactive prompts (especially for DKMS packages)
+	echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
+	
 	apt install -y \
 		libcamhal-ipu75xa0 \
 		libcamhal-ipu75xa \
@@ -175,7 +226,8 @@ EOF
 		libcamhal0 \
 		libia-*-ipu75xa0 \
 		gstreamer1.0-icamera \
-		libgsticamerainterface-1.0-1
+		libgsticamerainterface-1.0-1 \
+		intel-mipi-gmsl-dkms
 	
 	echo "Intel camera packages installed successfully."
 }
@@ -557,14 +609,16 @@ install_gpu_npu_pkgs() {
 	# Downloading GPU drivers (aligned with template configurations)
 	# Intel-graphics-compiler Version: v2.38.2 (from GitHub releases, public)
 	# GPU Version: 26.27.39122.11
+	#Level-zero Version: v1.32.0 (packages renamed: level-zero->libze1, level-zero-devel->libze-dev)
+
 	debpackage=(
 		"https://github.com/intel/intel-graphics-compiler/releases/download/v2.38.2/intel-igc-core-2_2.38.2+22051_amd64.deb"
 		"https://github.com/intel/intel-graphics-compiler/releases/download/v2.38.2/intel-igc-opencl-2_2.38.2+22051_amd64.deb"
 		"https://github.com/intel/compute-runtime/releases/download/26.27.39122.11/intel-ocloc_26.27.39122.11-0_amd64.deb"
 		"https://github.com/intel/compute-runtime/releases/download/26.27.39122.11/intel-opencl-icd_26.27.39122.11-0_amd64.deb"
 		"https://github.com/intel/compute-runtime/releases/download/26.27.39122.11/libze-intel-gpu1_26.27.39122.11-0_amd64.deb"
-		"https://github.com/oneapi-src/level-zero/releases/download/v1.27.0/level-zero_1.27.0+u24.04_amd64.deb"
-		"https://github.com/oneapi-src/level-zero/releases/download/v1.27.0/level-zero-devel_1.27.0+u24.04_amd64.deb")
+		"https://github.com/oneapi-src/level-zero/releases/download/v1.32.0/libze1_1.32.0%2Bu24.04_amd64.deb"
+		"https://github.com/oneapi-src/level-zero/releases/download/v1.32.0/libze-dev_1.32.0%2Bu24.04_amd64.deb")
 
 	# Download GPU packages 
 	for url in "${debpackage[@]}"; do
@@ -720,9 +774,9 @@ main() {
 
 	set_preferred_package_list
 
-	install_camera_packages
-
 	install_essential_tools
+
+	install_camera_packages
 
 	build_install_lpmd
 
