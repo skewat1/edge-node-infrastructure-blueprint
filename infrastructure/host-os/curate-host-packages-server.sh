@@ -11,6 +11,7 @@ echo "https_proxy=${https_proxy:-}"
 INTEL_OVERLAY_URL="https://download.01.org/edge-linux-overlay/ubuntu"
 INTEL_OVERLAY_KEY_URL="https://download.01.org/edge-linux-overlay/ubuntu/9C63745D2A211728B8CE98C5F84B1B6A704E41B2.gpg"
 INTEL_OVERLAY_KEY_FINGERPRINT="9C63745D2A211728B8CE98C5F84B1B6A704E41B2"
+DOCKER_KEY_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 SOF_OPENMODULES_SHA256="0bc5c1942918e86f84b9a7e97efb7e82b9aad2891398927780d5afd433128f3f"
 SOF_FIRMWARE_SHA256="ace80f314159034a2372c229a2a45443499649f6e747a63c7f2644464d399eba"
 SOF_RT722_TOPOLOGY_SHA256="fedb1f01b91b14335cca4bc5d89992f224687e633455ca7c6f0b5c00fc9cac2d"
@@ -671,8 +672,11 @@ install_docker() {
 
 	install -m 0755 -d /etc/apt/keyrings
 
-	curl -fsSL --connect-timeout 10 --max-time 60 https://download.docker.com/linux/ubuntu/gpg \
-		| gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+	local docker_key_file="/tmp/docker.gpg"
+	download_file "https://download.docker.com/linux/ubuntu/gpg" "${docker_key_file}"
+	verify_gpg_fingerprint "${docker_key_file}" "${DOCKER_KEY_FINGERPRINT}"
+	gpg --dearmor -o /etc/apt/keyrings/docker.gpg "${docker_key_file}"
+	rm -f "${docker_key_file}"
 
 	chmod a+r /etc/apt/keyrings/docker.gpg
 
@@ -712,7 +716,7 @@ instal_k3s() {
 	local script_path="/tmp/k3s-install.sh"
 	local actual_hash
 
-	# Try to download from specified commit hash first, then fallback to latest
+	# Download only the pinned installer so every execution is hash-verified.
 	for i in 1 2 3; do
 		if curl -sfL --max-time 120 --retry 3 "$SCRIPT_URL" -o "$script_path"; then
 			echo "  Successfully downloaded k3s installer from commit."
@@ -720,16 +724,8 @@ instal_k3s() {
 		else
 			echo "  k3s download attempt $i from commit failed, retrying..."
 			if [ $i -eq 3 ]; then
-				echo "  Falling back to latest k3s installer..."
-				if curl -sfL --max-time 120 --retry 3 https://get.k3s.io -o "$script_path"; then
-					echo "  Successfully downloaded latest k3s installer."
-					echo "  WARNING: Using latest version - hash verification will be skipped"
-					EXPECTED_HASH=""
-					break
-				else
-					echo "ERROR: Failed to download k3s installer from both sources" >&2
-					return 1
-				fi
+				echo "ERROR: Failed to download pinned k3s installer" >&2
+				return 1
 			fi
 		fi
 		sleep 10

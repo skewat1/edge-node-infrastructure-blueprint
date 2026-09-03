@@ -17,6 +17,8 @@ set -euo pipefail
 #
 # OVERRIDE VERSIONS (optional):
 #   K3S_VERSION=v1.32.3+k3s1 DOCKER_VERSION=27.5.1 HELM_VERSION=v3.17.2 ./download-resources.sh
+# Override checksums when changing versions or architectures:
+#   K3S_INSTALL_SH_SHA256=<sha256> DOCKER_SHA256=<sha256> ./download-resources.sh
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +32,11 @@ DOCKER_VERSION="${DOCKER_VERSION:-27.5.1}"
 COMPOSE_VERSION="${COMPOSE_VERSION:-v2.33.1}"
 HELM_VERSION="${HELM_VERSION:-v3.17.2}"
 INTEL_DEVICE_PLUGINS_VERSION="${INTEL_DEVICE_PLUGINS_VERSION:-v0.36.0}"
+
+# Checksums for the default pinned artifacts. Override these when changing
+# the corresponding version or architecture.
+K3S_INSTALL_SH_SHA256="${K3S_INSTALL_SH_SHA256:-d75e014f2d2ab5d30a318efa5c326f3b0b7596f194afcff90fa7a7a91166d5f7}"
+DOCKER_SHA256="${DOCKER_SHA256:-4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640}"
 
 # ------------------------------------------------------------------------------
 # Architecture detection
@@ -153,8 +160,8 @@ curl -fL "${K3S_INSTALL_URL}" -o "${RESOURCES_DIR}/k3s/install.sh"
 if [[ -n "${K3S_INSTALL_SH_SHA256:-}" ]]; then
     verify_sha256_hex "${RESOURCES_DIR}/k3s/install.sh" "${K3S_INSTALL_SH_SHA256}"
 else
-    warn "K3S_INSTALL_SH_SHA256 not set — install.sh content is not checksum-verified."
-    warn "  Pin it for reproducibility: K3S_INSTALL_SH_SHA256=<sha> ./download-resources.sh"
+    echo "[ERROR] K3S_INSTALL_SH_SHA256 is required — refusing to continue without install.sh verification." >&2
+    exit 1
 fi
 chmod +x "${RESOURCES_DIR}/k3s/install.sh"
 success "install.sh saved"
@@ -175,8 +182,8 @@ curl -fL "${DOCKER_STATIC_URL}" \
 if [[ -n "${DOCKER_SHA256:-}" ]]; then
     verify_sha256_hex "${RESOURCES_DIR}/docker/docker-${DOCKER_VERSION}.tgz" "${DOCKER_SHA256}"
 else
-    warn "DOCKER_SHA256 not set — docker-${DOCKER_VERSION}.tgz is not checksum-verified."
-    warn "  Pin it for reproducibility: DOCKER_SHA256=<sha> ./download-resources.sh"
+    echo "[ERROR] DOCKER_SHA256 is required — refusing to continue without Docker tarball verification." >&2
+    exit 1
 fi
 success "docker-${DOCKER_VERSION}.tgz saved"
 
